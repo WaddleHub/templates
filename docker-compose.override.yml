@@ -1,0 +1,174 @@
+# Local dev config only.
+#
+# User/permission mapping: services run as WADDLE_UID:WADDLE_GID (default 1000:1000) to match the
+# host developer's UID/GID, ensuring files written to bind-mounted volumes are owned correctly.
+# Local dev typically runs a rootful Docker daemon, so the host user's real IDs must be passed in.
+#
+# Defaults to 1000:1000 since this is the default user ID on many Linux distributions.
+
+{{#if (some public.php.install public.nginx.install public.mariadb.install public.opensearch.install public.redis.install public.node.install public.mail.enabled)}}
+services:
+{{#if public.php.install}}
+  php:
+    volumes:
+      - ../../shared:{{paths.shared}}
+      {{#if public.phpmyadmin.install}}
+      # phpMyAdmin is installed from the php container, and only ever locally.
+      - ./phpmyadmin:{{project_path 'phpmyadmin'}}
+      {{/if}}
+    user: "${WADDLE_UID:-1000}:${WADDLE_GID:-1000}"
+    # Tool caches live in the shared directory, so every project reuses what another downloaded.
+    {{#if (some public.composer.install (is_equal public.website.platform 'wordpress') public.node.install)}}
+    environment:
+      {{#if public.composer.install}}
+      - COMPOSER_CACHE_DIR={{paths.shared}}/cache/composer
+      {{/if}}
+      {{#if (is_equal public.website.platform 'wordpress')}}
+      - WP_CLI_CACHE_DIR={{paths.shared}}/cache/wp-cli
+      {{/if}}
+      {{#if public.node.install}}
+      - NPM_CONFIG_CACHE={{paths.shared}}/cache/npm
+      {{/if}}
+    {{/if}}
+  {{#if public.php.install_cron}}
+  php-cron:
+    volumes:
+      - ../../shared:{{paths.shared}}
+    user: "${WADDLE_UID:-1000}:${WADDLE_GID:-1000}"
+    # See php.
+    {{#if (some public.composer.install (is_equal public.website.platform 'wordpress') public.node.install)}}
+    environment:
+      {{#if public.composer.install}}
+      - COMPOSER_CACHE_DIR={{paths.shared}}/cache/composer
+      {{/if}}
+      {{#if (is_equal public.website.platform 'wordpress')}}
+      - WP_CLI_CACHE_DIR={{paths.shared}}/cache/wp-cli
+      {{/if}}
+      {{#if public.node.install}}
+      - NPM_CONFIG_CACHE={{paths.shared}}/cache/npm
+      {{/if}}
+    {{/if}}
+  {{/if}}
+{{/if}}
+
+  {{#if public.nginx.install}}
+  web:
+    # Publish on a random host port, which Waddle's router forwards ports 80/443 to by hostname,
+    # without touching the traffic.
+    ports:
+      {{#if public.nginx.http_port}}
+      - "${WADDLE_PUBLISH_IP:-127.0.0.1}::{{public.nginx.http_port}}"
+      {{/if}}
+      {{#if ssl.enabled}}
+      - "${WADDLE_PUBLISH_IP:-127.0.0.1}::{{public.nginx.https_port}}"
+      {{/if}}
+    # Tells Waddles local router which hostname (and its subdomains) to route here, and which
+    # of nginx's ports above serve plain HTTP and TLS.
+    labels:
+      - com.waddlehub.router.hosts={{public.website.url}}
+      {{#if public.nginx.http_port}}
+      - com.waddlehub.router.http-port={{public.nginx.http_port}}
+      {{/if}}
+      {{#if ssl.enabled}}
+      - com.waddlehub.router.https-port={{public.nginx.https_port}}
+      {{/if}}
+    networks:
+{{#if public.isolate_networks}}
+      - {{project_network}}-web
+{{#if public.mail.enabled}}
+      - {{project_network}}-mail
+{{/if}}
+{{else}}
+      - {{project_network}}
+{{/if}}
+    {{#if (some public.php.install (is_equal (get_platform_runtime public.website.platform) 'node') public.mail.enabled)}}
+    depends_on:
+      {{#if public.php.install}}
+      - php
+      {{/if}}
+      {{#if (is_equal (get_platform_runtime public.website.platform) 'node')}}
+      - node
+      {{/if}}
+      {{#if public.mail.enabled}}
+      - mail
+      {{/if}}
+    {{/if}}
+    volumes:
+      - ../../shared:{{paths.shared}}
+      {{#if public.phpmyadmin.install}}
+      - ./phpmyadmin:{{project_path 'phpmyadmin'}}
+      {{/if}}
+    user: "${WADDLE_UID:-1000}:${WADDLE_GID:-1000}"
+  {{/if}}
+
+  {{#if public.mariadb.install}}
+  db:
+    volumes:
+      - ../../shared:{{paths.shared}}
+    user: "${WADDLE_UID:-1000}:${WADDLE_GID:-1000}"
+  {{/if}}
+
+  {{#if public.opensearch.install}}
+  opensearch:
+    volumes:
+      - ../../shared:{{paths.shared}}
+    user: "${WADDLE_UID:-1000}:${WADDLE_GID:-1000}"
+  {{/if}}
+
+  {{#if public.redis.install}}
+  redis:
+    volumes:
+      - ../../shared:{{paths.shared}}
+    user: "${WADDLE_UID:-1000}:${WADDLE_GID:-1000}"
+  {{/if}}
+
+{{#if public.node.install}}
+  node:
+    volumes:
+      - ../../shared:{{paths.shared}}
+    user: "${WADDLE_UID:-1000}:${WADDLE_GID:-1000}"
+    # See php.
+    environment:
+      - NPM_CONFIG_CACHE={{paths.shared}}/cache/npm
+      {{#if (is_equal (get_platform_runtime public.website.platform) 'node')}}
+      - NODE_ENV=development
+    command: 'sh -c "{{get_platform_node_command public.website.platform 'development'}}"'
+      {{/if}}
+  {{#if public.node.install_cron}}
+  node-cron:
+    volumes:
+      - ../../shared:{{paths.shared}}
+    user: "${WADDLE_UID:-1000}:${WADDLE_GID:-1000}"
+    # See php.
+    environment:
+      - NPM_CONFIG_CACHE={{paths.shared}}/cache/npm
+  {{/if}}
+{{/if}}
+
+  {{#if public.mail.enabled}}
+  mail:
+    image: {{integrity_hash 'mailcatcher/Dockerfile' project_dirname}}
+    build:
+      context: .
+      dockerfile: ./mailcatcher/Dockerfile
+    container_name: mail_{{project_network}}
+    stop_signal: SIGTERM
+    expose:
+      - {{public.mail.smtp_port}}
+      - {{public.mailcatcher.http_port}}
+    volumes:
+      - ../../shared:{{paths.shared}}
+      - ./mailcatcher:{{project_path 'mailcatcher'}}
+      - ./bin:{{project_path 'bin'}}
+    networks:
+{{#if public.isolate_networks}}
+      - {{project_network}}-mail
+{{else}}
+      - {{project_network}}
+{{/if}}
+    restart: unless-stopped
+    user: "${WADDLE_UID:-1000}:${WADDLE_GID:-1000}"
+    entrypoint: {{project_path 'mailcatcher/script/run.sh'}}
+    command: 'mailcatcher --no-quit --foreground --http-ip 0.0.0.0 --http-port {{public.mailcatcher.http_port}} --smtp-ip 0.0.0.0 --smtp-port {{public.mail.smtp_port}}'
+  {{/if}}
+{{/if}}

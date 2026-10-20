@@ -1,0 +1,97 @@
+#!/bin/sh -eu
+
+# Run a file task as root inside a throwaway Alpine container, with the project mounted at /p.
+#
+# Service containers can create files owned by users the host has no rights over (e.g. a daemon
+# worker's `nobody`). Container root can read, restore and delete those regardless of their owner,
+# whether Docker runs rootful or rootless, so every such host-side task goes through here.
+#
+# NOTE: assumes it is executed from the project directory.
+#
+# Usage:
+#   sh ./bin/deploy/file-task archive <archive> <dir> [--exclude "<patterns>"] <path>...
+#       Pack <path>... (relative to <dir>) into <archive>, skipping any path matching a pattern.
+#   sh ./bin/deploy/file-task restore <archive> <dir> [--exclude "<patterns>"]
+#       Replace everything in <dir> with the content of <archive>, keeping paths matching a pattern.
+#   sh ./bin/deploy/file-task replace <archive> [<path>...]
+#       Remove each <path> (relative to the project directory), then extract <archive> into it.
+
+set -eu
+
+# When executed from the host, re-run this same script inside the container.
+if [ "${WADDLE_FILE_TASK:-}" != "1" ]; then
+    exec docker run --rm -u 0 --network none -e WADDLE_FILE_TASK=1 -v "$(pwd):/p" -w /p \
+        alpine sh ./bin/deploy/file-task "$@"
+fi
+
+task="${1}"
+archive="${2}"
+shift 2
+
+case "${task}" in
+    archive)
+        dir="${1}"
+        shift
+        excludes=""
+
+        if [ "${1:-}" = "--exclude" ]; then
+            excludes="${2}"
+            shift 2
+        fi
+
+        # Prepend the --exclude options to the remaining path arguments.
+        for pattern in ${excludes}; do
+            set -- "--exclude=${pattern}" "$@"
+        done
+
+        tar --numeric-owner -C "${dir}" -czf "${archive}" "$@"
+
+        # Hand the archive to the project directory's owner, so the host can remove it later.
+        chown "$(stat -c %u:%g /p)" "${archive}"
+        ;;
+    restore)
+        dir="${1}"
+        excludes=""
+
+        if [ "${2:-}" = "--exclude" ]; then
+            excludes="${3}"
+        fi
+
+        mkdir -p "${dir}"
+        cd "${dir}"
+
+        # Match excluded paths (and anything inside them) at any depth, the same way tar applied
+        # the patterns when the archive was created.
+        set --
+        for pattern in ${excludes}; do
+            if [ "$#" -gt 0 ]; then
+                set -- "$@" -o
+            fi
+
+            set -- "$@" -path "./${pattern}" -o -path "*/${pattern}" \
+                -o -path "./${pattern}/*" -o -path "*/${pattern}/*"
+        done
+
+        # Without patterns, match nothing.
+        if [ "$#" -eq 0 ]; then
+            set -- -path ./
+        fi
+
+        # Delete every non-directory outside the excluded paths, then every emptied directory.
+        find . -mindepth 1 ! \( "$@" \) ! -type d -exec rm -f {} +
+        find . -mindepth 1 -depth ! \( "$@" \) -type d -empty -delete
+
+        tar --numeric-owner -p -xzf "/p/${archive#./}"
+        ;;
+    replace)
+        for path in "$@"; do
+            rm -rf "./${path#./}"
+        done
+
+        tar --numeric-owner -p -xzf "${archive}"
+        ;;
+    *)
+        echo "[WADDLE ERROR] Unknown file task: ${task}"
+        exit 1
+        ;;
+esac

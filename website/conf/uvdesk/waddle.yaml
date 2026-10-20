@@ -1,0 +1,8 @@
+uvdesk:
+    site_url: '{{public.website.url}}'
+{{#if public.mail.enabled}}
+    support_email:
+        id: '{{coalesce public.mail.from_email public.website.admin_email}}'
+        name: '{{public.website.title}}'
+        mailer_id: 'waddle_mail'
+{{/if}}

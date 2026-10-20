@@ -1,0 +1,361 @@
+# Global config (dev/prod).
+
+{{#if (some public.php.install public.nginx.install public.mariadb.install public.opensearch.install public.redis.install public.node.install)}}
+services:
+{{#if public.php.install}}
+  php:
+    image: {{integrity_hash 'php/Dockerfile' project_dirname}}
+    build:
+      context: .
+      dockerfile: ./php/Dockerfile
+    container_name: php_{{project_network}}
+    stop_signal: SIGQUIT
+    # Database credentials, interpolated from the gitignored .env Waddle writes at build time.
+    # HOME: the container may run as any UID, which usually has no /etc/passwd entry, so HOME would
+    # otherwise be / which is not writable. Set it to /tmp instead to avoid permission issues.
+    environment:
+      - HOME=/tmp
+      - WADDLE_DB_USER=${WADDLE_DB_USER:-}
+      - WADDLE_DB_PASSWORD=${WADDLE_DB_PASSWORD:-}
+    expose:
+      - {{public.php.fastcgi_port}}
+    volumes:
+      - ./website:{{project_path 'website'}}
+      - ./php:{{project_path 'php'}}
+      - ./bin:{{project_path 'bin'}}
+      - ./ssl:{{project_path 'ssl'}}
+      {{#if public.composer.install}}
+      - ./composer:{{project_path 'composer'}}
+      {{/if}}
+      {{#if public.mail.enabled}}
+      - ./mail:{{project_path 'mail'}}
+      {{/if}}
+    networks:
+{{#if public.isolate_networks}}
+{{#if public.nginx.install}}
+      - {{project_network}}-web
+{{/if}}
+{{#if public.mariadb.install}}
+      - {{project_network}}-db
+{{/if}}
+{{#if public.redis.install}}
+      - {{project_network}}-redis
+{{/if}}
+{{#if public.opensearch.install}}
+      - {{project_network}}-opensearch
+{{/if}}
+{{#if public.mail.enabled}}
+      - {{project_network}}-mail
+{{/if}}
+{{#unless (some public.nginx.install public.mariadb.install public.redis.install public.opensearch.install public.mail.enabled)}}
+      - {{project_network}}
+{{/unless}}
+{{else}}
+      - {{project_network}}
+{{/if}}
+    restart: unless-stopped
+    entrypoint: {{project_path 'php/script/run.sh'}}
+    command: 'php-fpm --nodaemonize'
+    {{#if (some public.mariadb.install public.redis.install public.opensearch.install)}}
+    depends_on:
+      {{#if public.mariadb.install}}
+      - db
+      {{/if}}
+      {{#if public.redis.install}}
+      - redis
+      {{/if}}
+      {{#if public.opensearch.install}}
+      - opensearch
+      {{/if}}
+    {{/if}}
+  {{#if public.php.install_cron}}
+  php-cron:
+    image: {{integrity_hash 'php/cron/Dockerfile' project_dirname}}
+    build:
+      context: .
+      dockerfile: ./php/cron/Dockerfile
+    container_name: php-cron_{{project_network}}
+    stop_signal: SIGQUIT
+    # See php's environment for HOME.
+    environment:
+      - HOME=/tmp
+      - WADDLE_DB_USER=${WADDLE_DB_USER:-}
+      - WADDLE_DB_PASSWORD=${WADDLE_DB_PASSWORD:-}
+    volumes:
+      - ./website:{{project_path 'website'}}
+      - ./php:{{project_path 'php'}}
+      - ./bin:{{project_path 'bin'}}
+      - ./ssl:{{project_path 'ssl'}}
+      {{#if public.composer.install}}
+      - ./composer:{{project_path 'composer'}}
+      {{/if}}
+      {{#if public.mail.enabled}}
+      - ./mail:{{project_path 'mail'}}
+      {{/if}}
+    networks:
+{{#if public.isolate_networks}}
+{{#if public.nginx.install}}
+      - {{project_network}}-web
+{{/if}}
+{{#if public.mariadb.install}}
+      - {{project_network}}-db
+{{/if}}
+{{#if public.redis.install}}
+      - {{project_network}}-redis
+{{/if}}
+{{#if public.opensearch.install}}
+      - {{project_network}}-opensearch
+{{/if}}
+{{#if public.mail.enabled}}
+      - {{project_network}}-mail
+{{/if}}
+{{#unless (some public.nginx.install public.mariadb.install public.redis.install public.opensearch.install public.mail.enabled)}}
+      - {{project_network}}
+{{/unless}}
+{{else}}
+      - {{project_network}}
+{{/if}}
+    restart: unless-stopped
+    entrypoint: {{project_path 'php/cron/script/run.sh'}}
+    depends_on:
+      - php
+  {{/if}}
+{{/if}}
+
+  {{#if public.nginx.install}}
+  web:
+    image: {{integrity_hash 'nginx/Dockerfile' project_dirname}}
+    build:
+      context: .
+      dockerfile: ./nginx/Dockerfile
+    container_name: web_{{project_network}}
+    stop_signal: SIGQUIT
+    volumes:
+      - ./website/src:{{project_path 'website/src'}}
+      - ./nginx:{{project_path 'nginx'}}
+      - ./ssl:{{project_path 'ssl'}}
+      - ./bin:{{project_path 'bin'}}
+    networks:
+{{#if public.isolate_networks}}
+      - {{project_network}}-web
+{{else}}
+      - {{project_network}}
+{{/if}}
+    restart: unless-stopped
+    entrypoint: {{project_path 'nginx/script/run.sh'}}
+    command: 'nginx -g "daemon off;"'
+    {{#if (some public.php.install (is_equal (get_platform_runtime public.website.platform) 'node'))}}
+    depends_on:
+      {{#if public.php.install}}
+      - php
+      {{/if}}
+      {{#if (is_equal (get_platform_runtime public.website.platform) 'node')}}
+      - node
+      {{/if}}
+    {{/if}}
+  {{/if}}
+
+  {{#if public.mariadb.install}}
+  db:
+    image: {{integrity_hash 'mariadb/Dockerfile' project_dirname}}
+    build:
+      context: .
+      dockerfile: ./mariadb/Dockerfile
+    container_name: db_{{project_network}}
+    stop_signal: SIGTERM
+    # DB credentials for mariadb/script/setup.sh (run via `docker compose exec db`), interpolated
+    # from the gitignored .env so the literal secret is never committed to the compose file.
+    environment:
+      - WADDLE_DB_USER=${WADDLE_DB_USER:-}
+      - WADDLE_DB_PASSWORD=${WADDLE_DB_PASSWORD:-}
+    expose:
+      - 3306
+    volumes:
+      - ./mariadb:{{project_path 'mariadb'}}
+    networks:
+{{#if public.isolate_networks}}
+      - {{project_network}}-db
+{{else}}
+      - {{project_network}}
+{{/if}}
+    restart: unless-stopped
+    entrypoint: {{project_path 'mariadb/script/run.sh'}}
+    command: '{{{advanced.mariadb.command}}}'
+  {{/if}}
+
+  {{#if public.opensearch.install}}
+  opensearch:
+    image: {{integrity_hash 'opensearch/Dockerfile' project_dirname}}
+    build:
+      context: .
+      dockerfile: ./opensearch/Dockerfile
+    container_name: opensearch_{{project_network}}
+    stop_signal: SIGTERM
+    expose:
+      - 9200
+      - 9300
+    volumes:
+      - ./opensearch:{{project_path 'opensearch'}}
+    networks:
+{{#if public.isolate_networks}}
+      - {{project_network}}-opensearch
+{{else}}
+      - {{project_network}}
+{{/if}}
+    restart: unless-stopped
+    entrypoint: {{project_path 'opensearch/script/run.sh'}}
+    command: 'opensearch'
+  {{/if}}
+
+  {{#if public.redis.install}}
+  redis:
+    image: {{integrity_hash 'redis/Dockerfile' project_dirname}}
+    build:
+      context: .
+      dockerfile: ./redis/Dockerfile
+    container_name: redis_{{project_network}}
+    stop_signal: SIGTERM
+    expose:
+      - 6379
+    volumes:
+      - ./redis:{{project_path 'redis'}}
+    networks:
+{{#if public.isolate_networks}}
+      - {{project_network}}-redis
+{{else}}
+      - {{project_network}}
+{{/if}}
+    restart: unless-stopped
+    entrypoint: {{project_path 'redis/script/run.sh'}}
+    command: 'redis-server'
+  {{/if}}
+
+{{#if public.node.install}}
+  node:
+    image: {{integrity_hash 'node/Dockerfile' project_dirname}}
+    build:
+      context: .
+      dockerfile: ./node/Dockerfile
+    container_name: node_{{project_network}}
+    stop_signal: SIGTERM
+    # See php's environment for HOME.
+    environment:
+      - HOME=/tmp
+      {{#if (is_equal (get_platform_runtime public.website.platform) 'node')}}
+      - NODE_ENV=production
+      {{/if}}
+    volumes:
+      - ./website:{{project_path 'website'}}
+      - ./node:{{project_path 'node'}}
+      - ./bin:{{project_path 'bin'}}
+    networks:
+{{#if public.isolate_networks}}
+{{#if public.nginx.install}}
+      - {{project_network}}-web
+{{/if}}
+{{#if public.mariadb.install}}
+      - {{project_network}}-db
+{{/if}}
+{{#if public.redis.install}}
+      - {{project_network}}-redis
+{{/if}}
+{{#if public.opensearch.install}}
+      - {{project_network}}-opensearch
+{{/if}}
+{{#if public.mail.enabled}}
+      - {{project_network}}-mail
+{{/if}}
+{{#unless (some public.nginx.install public.mariadb.install public.redis.install public.opensearch.install public.mail.enabled)}}
+      - {{project_network}}
+{{/unless}}
+{{else}}
+      - {{project_network}}
+{{/if}}
+{{#if (is_equal (get_platform_runtime public.website.platform) 'node')}}
+    # Forwards stop signals to the website, and reaps the processes it leaves behind.
+    init: true
+    restart: unless-stopped
+    entrypoint: {{project_path 'node/script/run.sh'}}
+    command: 'sh -c "{{get_platform_node_command public.website.platform 'production'}}"'
+    {{#if public.mariadb.install}}
+    depends_on:
+      - db
+    {{/if}}
+{{else}}
+    restart: on-failure:5
+    entrypoint: {{project_path 'node/script/run.sh'}}
+{{/if}}
+  {{#if public.node.install_cron}}
+  node-cron:
+    image: {{integrity_hash 'node/cron/Dockerfile' project_dirname}}
+    build:
+      context: .
+      dockerfile: ./node/cron/Dockerfile
+    container_name: node-cron_{{project_network}}
+    stop_signal: SIGTERM
+    # See php's environment for HOME.
+    environment:
+      - HOME=/tmp
+    volumes:
+      - ./website:{{project_path 'website'}}
+      - ./node:{{project_path 'node'}}
+      - ./bin:{{project_path 'bin'}}
+    networks:
+{{#if public.isolate_networks}}
+{{#if public.nginx.install}}
+      - {{project_network}}-web
+{{/if}}
+{{#if public.mariadb.install}}
+      - {{project_network}}-db
+{{/if}}
+{{#if public.redis.install}}
+      - {{project_network}}-redis
+{{/if}}
+{{#if public.opensearch.install}}
+      - {{project_network}}-opensearch
+{{/if}}
+{{#if public.mail.enabled}}
+      - {{project_network}}-mail
+{{/if}}
+{{#unless (some public.nginx.install public.mariadb.install public.redis.install public.opensearch.install public.mail.enabled)}}
+      - {{project_network}}
+{{/unless}}
+{{else}}
+      - {{project_network}}
+{{/if}}
+    restart: unless-stopped
+    entrypoint: {{project_path 'node/cron/script/run.sh'}}
+  {{/if}}
+{{/if}}
+
+networks:
+{{#if public.isolate_networks}}
+{{#if public.nginx.install}}
+  {{project_network}}-web:
+    driver: bridge
+{{/if}}
+{{#if public.mariadb.install}}
+  {{project_network}}-db:
+    driver: bridge
+{{/if}}
+{{#if public.redis.install}}
+  {{project_network}}-redis:
+    driver: bridge
+{{/if}}
+{{#if public.opensearch.install}}
+  {{project_network}}-opensearch:
+    driver: bridge
+{{/if}}
+{{#if public.mail.enabled}}
+  {{project_network}}-mail:
+    driver: bridge
+{{/if}}
+{{#unless (some public.nginx.install public.mariadb.install public.redis.install public.opensearch.install public.mail.enabled)}}
+  {{project_network}}:
+    driver: bridge
+{{/unless}}
+{{else}}
+  {{project_network}}:
+    driver: bridge
+{{/if}}
+{{/if}}

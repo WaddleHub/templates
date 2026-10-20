@@ -1,0 +1,27 @@
+uvdesk_mailbox:
+    emails: ~
+{{#if public.mail.enabled}}
+    # UVdesk sends every email through a configured mailbox, and silently sends nothing when none
+    # exists. This one delivers over SMTP to the internal `mail` service (MailCatcher locally, SMTP
+    # relay on remotes). UVdesk requires an imap_server block even for send-only use, since it
+    # takes the mailbox's address from imap_server.username.
+    default_mailbox: waddle_mail
+    mailboxes:
+        waddle_mail:
+            name: 'Waddle mail service'
+            enabled: true
+            disable_outbound_emails: false
+            use_strict_mode: false
+            imap_server:
+                host: 'mail'
+                username: '{{coalesce public.mail.from_email public.website.admin_email}}'
+                password: ''
+            smtp_server:
+                host: 'mail'
+                port: {{public.mail.smtp_port}}
+                username: '{{coalesce public.mail.from_email public.website.admin_email}}'
+                password: ''
+                sender_address: '{{coalesce public.mail.from_email public.website.admin_email}}'
+{{else}}
+    mailboxes: ~
+{{/if}}

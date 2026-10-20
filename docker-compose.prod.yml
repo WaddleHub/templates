@@ -1,0 +1,90 @@
+# Options only applicable in production environment. Specifically, we need to bind the webserver to
+# the host ports and run the SMTP relay that forwards mail to a real external SMTP provider.
+#
+# User/permission mapping: services run as WADDLE_UID:WADDLE_GID (default 0:0). On a rootless
+# Docker remote, UID 0 inside the container maps to the daemon owner's real UID on the host via
+# kernel user namespace remapping, so file ownership is correct with no extra configuration. On a
+# rootful remote, set WADDLE_UID and WADDLE_GID in the environment to the host user's actual IDs.
+
+{{#if (some public.php.install public.nginx.install public.mariadb.install public.opensearch.install public.redis.install public.node.install public.mail.enabled)}}
+services:
+{{#if public.php.install}}
+  php:
+    user: "${WADDLE_UID:-0}:${WADDLE_GID:-0}"
+  {{#if public.php.install_cron}}
+  php-cron:
+    user: "${WADDLE_UID:-0}:${WADDLE_GID:-0}"
+  {{/if}}
+{{/if}}
+
+{{#if public.nginx.install}}
+  web:
+    user: "${WADDLE_UID:-0}:${WADDLE_GID:-0}"
+    cap_add:
+      - NET_BIND_SERVICE
+    ports:
+      {{#if public.nginx.http_port}}
+      - {{public.nginx.http_port}}:{{public.nginx.http_port}}
+      {{/if}}
+      {{#if public.nginx.https_port}}
+      - {{public.nginx.https_port}}:{{public.nginx.https_port}}
+      {{/if}}
+{{/if}}
+
+{{#if public.mariadb.install}}
+  db:
+    user: "${WADDLE_UID:-0}:${WADDLE_GID:-0}"
+{{/if}}
+
+{{#if public.opensearch.install}}
+  opensearch:
+    user: "${WADDLE_UID:-0}:${WADDLE_GID:-0}"
+{{/if}}
+
+{{#if public.redis.install}}
+  redis:
+    user: "${WADDLE_UID:-0}:${WADDLE_GID:-0}"
+{{/if}}
+
+{{#if public.node.install}}
+  node:
+    user: "${WADDLE_UID:-0}:${WADDLE_GID:-0}"
+  {{#if public.node.install_cron}}
+  node-cron:
+    user: "${WADDLE_UID:-0}:${WADDLE_GID:-0}"
+  {{/if}}
+{{/if}}
+
+{{#if public.mail.enabled}}
+  # SMTP relay. It listens on the same internal endpoint (the `mail` service on
+  # {{public.mail.smtp_port}}) so PHP/Node and the application send mail
+  # identically in every environment; only which container answers differs
+  # (locally we use MailCatcher).
+  mail:
+    image: {{integrity_hash 'smtp/Dockerfile' project_dirname}}
+    build:
+      context: .
+      dockerfile: ./smtp/Dockerfile
+    container_name: mail_{{project_network}}
+    profiles:
+      - relay
+    stop_signal: SIGTERM
+    expose:
+      - {{public.mail.smtp_port}}
+    environment:
+      # Injected into this remote's .env over SSH at deploy time; read by msmtp's passwordeval.
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+    volumes:
+      - ./smtp:{{project_path 'smtp'}}
+      - ./bin:{{project_path 'bin'}}
+    networks:
+{{#if public.isolate_networks}}
+      - {{project_network}}-mail
+{{else}}
+      - {{project_network}}
+{{/if}}
+    restart: unless-stopped
+    user: "${WADDLE_UID:-0}:${WADDLE_GID:-0}"
+    entrypoint: {{project_path 'smtp/script/run.sh'}}
+{{/if}}
+{{/if}}

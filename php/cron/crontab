@@ -1,0 +1,5 @@
+PATH={{project_path 'bin'}}:{{public.php.prefix}}/bin:{{public.php.prefix}}/sbin:{{project_path 'website/src/vendor/bin'}}:{{project_path 'website/src/bin'}}:{{#if public.composer.install}}{{project_path 'composer/conf/home/vendor/bin'}}:{{/if}}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+{{#each public.php.cron_jobs}}
+{{this.schedule}} {{this.command}}
+{{/each}}

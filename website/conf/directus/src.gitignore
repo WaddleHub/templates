@@ -1,0 +1,5 @@
+# Copied to website/src/.gitignore by the installer (named so, since Waddle renders a template
+# named `gitignore` as `.gitignore`, which would apply to this directory instead).
+.DS_Store
+node_modules
+.env

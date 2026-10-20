@@ -1,0 +1,8 @@
+network.host: 0.0.0.0
+discovery.type: single-node
+path:
+  logs: {{project_path 'opensearch/log'}}
+  data: {{project_path 'opensearch/data'}}
+{{#if public.opensearch.insecure}}
+plugins.security.disabled: true
+{{/if}}

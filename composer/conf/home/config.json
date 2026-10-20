@@ -1,0 +1,9 @@
+{
+{{#if (or (is_equal public.website.platform 'magento') (is_equal public.website.platform 'symfony') (is_equal public.website.platform 'laravel') (is_equal public.website.platform 'flarum'))}}
+  "config": {
+    "audit": {
+      "block-insecure": false
+    }
+  }
+{{/if}}
+}

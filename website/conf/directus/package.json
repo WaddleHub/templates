@@ -1,0 +1,6 @@
+{
+  "name": "{{project_dirname}}",
+  "private": true,
+  "description": "Directus, installed as an npm package. Run with `npx directus start`.",
+  "dependencies": {}
+}

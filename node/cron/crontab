@@ -1,0 +1,5 @@
+PATH={{public.node.prefix}}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+{{#each public.node.cron_jobs}}
+{{this.schedule}} {{this.command}}
+{{/each}}

@@ -1,0 +1,32 @@
+baseUrl: '{{website_url}}'
+databaseConfiguration:
+  driver: mysql
+  host: db
+  port: 3306
+  database: '{{public.website.db_name}}'
+  username: '{{private.website_credentials.db_username}}'
+  password: '{{private.website_credentials.db_password}}'
+  prefix: ''
+adminUser:
+  username: '{{public.website.admin_username}}'
+  password: '{{private.website_credentials.admin_password}}'
+  password_confirmation: '{{private.website_credentials.admin_password}}'
+  email: '{{public.website.admin_email}}'
+settings:
+  forum_title: '{{public.website.title}}'
+  default_locale: '{{public.website.language}}'
+  # Flarum's default `mail` driver is SwiftMailer's SendmailTransport, which runs
+  # /usr/sbin/sendmail -bs and ignores PHP's sendmail_path. Use SMTP to the
+  # internal `mail` service instead (MailCatcher locally, SMTP relay on remotes),
+  # or Flarum's log driver when the project has no mail service.
+  mail_from: '{{coalesce public.mail.from_email public.website.admin_email}}'
+{{#if public.mail.enabled}}
+  mail_driver: 'smtp'
+  mail_host: 'mail'
+  mail_port: '{{public.mail.smtp_port}}'
+  mail_encryption: ''
+  mail_username: ''
+  mail_password: ''
+{{else}}
+  mail_driver: 'log'
+{{/if}}

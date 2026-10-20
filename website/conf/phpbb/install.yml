@@ -1,0 +1,32 @@
+installer:
+    admin:
+        name: "{{public.website.admin_username}}"
+        password: "{{private.website_credentials.admin_password}}"
+        email: "{{public.website.admin_email}}"
+    board:
+        lang: "{{public.website.language}}"
+        name: "{{public.website.title}}"
+        description: "{{public.website.title}}"
+    database:
+        dbms: mysqli
+        dbhost: db
+        dbport: 3306
+        dbuser: "{{private.website_credentials.db_username}}"
+        dbpasswd: "{{private.website_credentials.db_password}}"
+        dbname: "{{public.website.db_name}}"
+        table_prefix: phpbb_
+    email:
+        enabled: false
+        smtp_delivery: false
+        smtp_host: mail
+        smtp_port: {{public.mail.smtp_port}}
+        smtp_user: ""
+        smtp_pass: ""
+    server:
+        cookie_secure: {{#if ssl.enabled}}true{{else}}false{{/if}}
+        server_protocol: "{{#if ssl.enabled}}https://{{else}}http://{{/if}}"
+        force_server_vars: true
+        server_name: "{{public.website.url}}"
+        server_port: {{#if ssl.enabled}}{{public.nginx.https_port}}{{else}}{{public.nginx.http_port}}{{/if}}
+        script_path: /
+    extensions: []

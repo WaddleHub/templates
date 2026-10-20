@@ -1,0 +1,281 @@
+#!/bin/sh -eux
+echo "[WADDLE NOTICE] Setting up environment variables."
+
+# Validate project directory content.
+if ! [ -f .config.public.json ]; then
+    echo "[WADDLE ERROR] Public project configuration not found."
+    exit 1
+fi
+
+
+# Make sure project directory is a git repository.
+if [ ! -d .git ]; then
+    echo "[WADDLE ERROR] Project is not a git repository."
+    exit 1
+fi
+
+# Set default values for all variables (to ensure they are set).
+############################################
+
+if ! command -v git >/dev/null 2>&1; then
+    echo "[WADDLE ERROR] git is not available."
+    exit 1
+fi
+
+_current_branch="$(git branch --show-current)"
+
+if [ -z "${_current_branch}" ]; then
+    echo "[WADDLE ERROR] Project is in a detached HEAD state."
+    exit 1
+fi
+
+# Build tag. Reuse the branch name when resuming an existing build, otherwise mint a new one.
+case "${_current_branch}" in
+    waddle-build-*) export WADDLE_BUILD_TAG="${_current_branch}" ;;
+    *) export WADDLE_BUILD_TAG="waddle-build-$(date +%s)" ;;
+esac
+
+# Original branch (before any git operations).
+export WADDLE_ORIGINAL_BRANCH="${_current_branch}"
+unset _current_branch
+
+# Resolve config-derived defaults when jq is available; fall back to empty strings otherwise.
+if command -v jq >/dev/null 2>&1; then
+    # Platform.
+    export WADDLE_PLATFORM="$(jq -r .website.platform .config.public.json)"
+
+    # DB name.
+    export WADDLE_DB_NAME="$(jq -r .website.db_name .config.public.json)"
+
+    # Whether SSL is enabled (determined by nginx.https_port being set).
+    _https_port="$(jq -r '.nginx.https_port' .config.public.json)"
+    if [ -n "${_https_port}" ] && [ "${_https_port}" != "null" ]; then
+        export WADDLE_SSL="0"
+    else
+        export WADDLE_SSL=""
+    fi
+    unset _https_port
+
+    # Website URL (domain name).
+    export WADDLE_WEBSITE_URL="$(jq -r .website.url .config.public.json)"
+
+    # Whether to install Composer.
+    if [ "$(jq -r .composer.install .config.public.json)" = "true" ]; then
+        export WADDLE_INSTALL_COMPOSER="0"
+    else
+        export WADDLE_INSTALL_COMPOSER=""
+    fi
+
+    # Whether to install PhpMyAdmin.
+    if [ "$(jq -r .phpmyadmin.install .config.public.json)" = "true" ]; then
+        export WADDLE_INSTALL_PHPMYADMIN="0"
+    else
+        export WADDLE_INSTALL_PHPMYADMIN=""
+    fi
+else
+    export WADDLE_PLATFORM=""
+    export WADDLE_DB_NAME=""
+    export WADDLE_SSL=""
+    export WADDLE_WEBSITE_URL=""
+    export WADDLE_INSTALL_COMPOSER=""
+    export WADDLE_INSTALL_PHPMYADMIN=""
+fi
+
+# Sensitive credentials live in the gitignored .config.private.json (never shared, never on remotes).
+# They are exported here for the host-side platform installer scripts. On remotes the private config
+# is absent and the installer does not run there anyway — containers read the same values from the
+# .env file that Waddle writes over SSH.
+if command -v jq >/dev/null 2>&1 && [ -f .config.private.json ]; then
+    export WADDLE_DB_USER="$(jq -r '.website_credentials.db_username // ""' .config.private.json)"
+    export WADDLE_DB_PASSWORD="$(jq -r '.website_credentials.db_password // ""' .config.private.json)"
+    export WADDLE_ADMIN_PASSWORD="$(jq -r '.website_credentials.admin_password // ""' .config.private.json)"
+else
+    export WADDLE_DB_USER=""
+    export WADDLE_DB_PASSWORD=""
+    export WADDLE_ADMIN_PASSWORD=""
+fi
+
+# Unresolvable values.
+export WADDLE_RUN_PLATFORM_INSTALLER=""
+export WADDLE_BACKUP_MEDIA=""
+export WADDLE_BACKUP_SRC=""
+export WADDLE_CLEAN=""
+export WADDLE_DROP_DB=""
+export WADDLE_KEEP_BUILD_BRANCH=""
+export WADDLE_REMOTE=""
+
+# Resolve arguments and override the defaults above. Value flags consume the next
+# argument; boolean flags simply set their variable to "0". Unrecognised tokens are
+# skipped.
+while [ "$#" -gt 0 ]; do
+    case "${1}" in
+        --build-tag) export WADDLE_BUILD_TAG="${2}"; shift 2 ;;
+        --original-branch) export WADDLE_ORIGINAL_BRANCH="${2}"; shift 2 ;;
+        --platform) export WADDLE_PLATFORM="${2}"; shift 2 ;;
+        --db-name) export WADDLE_DB_NAME="${2}"; shift 2 ;;
+        --url) export WADDLE_WEBSITE_URL="${2}"; shift 2 ;;
+        --ssl) export WADDLE_SSL="0"; shift ;;
+        --install-composer) export WADDLE_INSTALL_COMPOSER="0"; shift ;;
+        --install-phpmyadmin) export WADDLE_INSTALL_PHPMYADMIN="0"; shift ;;
+        --run-platform-installer) export WADDLE_RUN_PLATFORM_INSTALLER="0"; shift ;;
+        --backup-media) export WADDLE_BACKUP_MEDIA="0"; shift ;;
+        --backup-src) export WADDLE_BACKUP_SRC="0"; shift ;;
+        --clean) export WADDLE_CLEAN="0"; shift ;;
+        --drop-db) export WADDLE_DROP_DB="0"; shift ;;
+        --keep-build-branch) export WADDLE_KEEP_BUILD_BRANCH="0"; shift ;;
+        --remote) export WADDLE_REMOTE="0"; shift ;;
+        *) shift ;;
+    esac
+done
+
+if [ "${WADDLE_REMOTE}" != "0" ] && ! [ -f .config.private.json ]; then
+    echo "[WADDLE ERROR] Private project configuration not found."
+    exit 1
+fi
+
+WADDLE_BUILD_DIR="$(pwd)/builder/${WADDLE_BUILD_TAG}"
+export WADDLE_BUILD_DIR
+
+echo ""
+echo ""
+echo "[WADDLE NOTICE] Environment variables set."
+echo ""
+echo "========================================================================="
+echo "WADDLE_BUILD_TAG = ${WADDLE_BUILD_TAG}"
+echo ""
+echo "Unique name for git branch and build resource directory."
+echo "-------------------------------------------------------------------------"
+echo "WADDLE_ORIGINAL_BRANCH = ${WADDLE_ORIGINAL_BRANCH}"
+echo ""
+echo "Original branch before any git operations (for merge/restoration)."
+echo "-------------------------------------------------------------------------"
+echo "WADDLE_PLATFORM = ${WADDLE_PLATFORM}"
+echo ""
+echo "Website blueprint/platform used by this project."
+echo "-------------------------------------------------------------------------"
+echo "WADDLE_DB_NAME = ${WADDLE_DB_NAME}"
+echo ""
+echo "Website database name."
+echo "-------------------------------------------------------------------------"
+echo "WADDLE_WEBSITE_URL = ${WADDLE_WEBSITE_URL}"
+echo ""
+echo "Website URL."
+echo "-------------------------------------------------------------------------"
+echo "WADDLE_INSTALL_COMPOSER = ${WADDLE_INSTALL_COMPOSER}"
+echo ""
+echo "Whether to install Composer inside PHP guest system."
+echo "-------------------------------------------------------------------------"
+echo "WADDLE_INSTALL_PHPMYADMIN = ${WADDLE_INSTALL_PHPMYADMIN}"
+echo ""
+echo "Whether to install PhpMyAdmin."
+echo "-------------------------------------------------------------------------"
+echo "WADDLE_SSL = ${WADDLE_SSL}"
+echo ""
+echo "Whether to use SSL/TLS (https)."
+echo "-------------------------------------------------------------------------"
+echo "WADDLE_BACKUP_MEDIA = ${WADDLE_BACKUP_MEDIA}"
+echo ""
+echo "Whether to backup media directory (if any, depends on platform)."
+echo "-------------------------------------------------------------------------"
+echo "WADDLE_BACKUP_SRC = ${WADDLE_BACKUP_SRC}"
+echo ""
+echo "Whether to backup website source directory (for improved rollback stability)."
+echo "-------------------------------------------------------------------------"
+echo "WADDLE_CLEAN = ${WADDLE_CLEAN}"
+echo ""
+echo "Whether to delete build resource directory after building."
+echo "-------------------------------------------------------------------------"
+echo "WADDLE_RUN_PLATFORM_INSTALLER = ${WADDLE_RUN_PLATFORM_INSTALLER}"
+echo ""
+echo "Whether to run the platform installer script."
+echo "-------------------------------------------------------------------------"
+echo "WADDLE_DROP_DB = ${WADDLE_DROP_DB}"
+echo ""
+echo "Whether to replace the current database with a clean one."
+echo "-------------------------------------------------------------------------"
+echo "WADDLE_KEEP_BUILD_BRANCH = ${WADDLE_KEEP_BUILD_BRANCH}"
+echo ""
+echo "Whether to keep the git branch used while building, for history tracking."
+echo "-------------------------------------------------------------------------"
+echo "WADDLE_BUILD_DIR = ${WADDLE_BUILD_DIR}"
+echo ""
+echo "Absolute path to build tag directory."
+echo "-------------------------------------------------------------------------"
+echo "WADDLE_REMOTE = ${WADDLE_REMOTE}"
+echo ""
+echo "Set when running on a remote server (e.g. staging or production). Skips local-only steps such as docker image builds, SSL certificate generation, and git branch management, since those are handled by Waddle before this script runs."
+echo "-------------------------------------------------------------------------"
+echo ""
+echo ""
+
+export WADDLE_ENV_PREPARED="0"
+
+# Validate required values possibly empty.
+if [ -z "${WADDLE_PLATFORM}" ]; then
+    echo "[WADDLE ERROR] Platform is not set. Please specify it with --platform."
+    exit 1
+fi
+
+if [ -z "${WADDLE_DB_NAME}" ]; then
+    echo "[WADDLE ERROR] Database name is not set. Please specify it with --db-name."
+    exit 1
+fi
+
+if [ -z "${WADDLE_WEBSITE_URL}" ]; then
+    echo "[WADDLE ERROR] Website URL is not set. Please specify it with --url."
+    exit 1
+fi
+
+# Validate that original branch is not a build branch.
+case "${WADDLE_ORIGINAL_BRANCH}" in
+    waddle-build-*)
+        echo "[WADDLE ERROR] Cannot use a build branch (${WADDLE_ORIGINAL_BRANCH}) as the original branch."
+        echo "[WADDLE ERROR] Build branches are temporary and should not be used for restoration."
+        exit 1
+        ;;
+esac
+
+# Concatenate arguments list to sub-commands.
+WADDLE_ARGS="--build-tag ${WADDLE_BUILD_TAG} --original-branch ${WADDLE_ORIGINAL_BRANCH} --platform ${WADDLE_PLATFORM} --db-name ${WADDLE_DB_NAME} --url ${WADDLE_WEBSITE_URL}"
+
+if [ "${WADDLE_SSL}" = "0" ]; then
+    WADDLE_ARGS="${WADDLE_ARGS} --ssl"
+fi
+
+if [ "${WADDLE_INSTALL_COMPOSER}" = "0" ]; then
+    WADDLE_ARGS="${WADDLE_ARGS} --install-composer"
+fi
+
+if [ "${WADDLE_INSTALL_PHPMYADMIN}" = "0" ]; then
+    WADDLE_ARGS="${WADDLE_ARGS} --install-phpmyadmin"
+fi
+
+if [ "${WADDLE_RUN_PLATFORM_INSTALLER}" = "0" ]; then
+    WADDLE_ARGS="${WADDLE_ARGS} --run-platform-installer"
+fi
+
+if [ "${WADDLE_BACKUP_MEDIA}" = "0" ]; then
+    WADDLE_ARGS="${WADDLE_ARGS} --backup-media"
+fi
+
+if [ "${WADDLE_BACKUP_SRC}" = "0" ]; then
+    WADDLE_ARGS="${WADDLE_ARGS} --backup-src"
+fi
+
+if [ "${WADDLE_CLEAN}" = "0" ]; then
+    WADDLE_ARGS="${WADDLE_ARGS} --clean"
+fi
+
+if [ "${WADDLE_DROP_DB}" = "0" ]; then
+    WADDLE_ARGS="${WADDLE_ARGS} --drop-db"
+fi
+
+if [ "${WADDLE_KEEP_BUILD_BRANCH}" = "0" ]; then
+    WADDLE_ARGS="${WADDLE_ARGS} --keep-build-branch"
+fi
+
+if [ "${WADDLE_REMOTE}" = "0" ]; then
+    WADDLE_ARGS="${WADDLE_ARGS} --remote"
+fi
+
+export WADDLE_ARGS="${WADDLE_ARGS}"

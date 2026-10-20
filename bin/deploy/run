@@ -1,0 +1,466 @@
+#!/bin/sh -eux
+
+# Repeats the shebang's flags because some operations run via SSH ignore them.
+set -eux
+
+. ./bin/deploy/set-env "$@"
+
+# Create the builder directory if it does not exist.
+if [ ! -d ./builder/${WADDLE_BUILD_TAG} ]; then
+        mkdir -p ./builder/${WADDLE_BUILD_TAG}
+fi
+
+# Ensures a Docker Compose service is running, starting or unpausing it if needed.
+#
+# Returns 0 if the service is up after the call, 1 if the service is not configured or does not
+# stay running.
+ensureServiceUp()
+{
+    if ! isServiceConfigured "${1}"; then
+        return 1
+    fi
+
+    if [ -n "$(docker compose ps --services "${1}" --status paused)" ]; then
+        docker compose unpause "${1}"
+        return 0
+    elif [ -n "$(docker compose ps --services "${1}" --status exited)" ]; then
+        docker compose up -d "${1}"
+
+        # `docker compose up -d` only confirms the start command was accepted, not that the
+        # container stayed up. A service restarting from a broken state (e.g. a database whose
+        # data directory never finished initializing) can crash again within moments — without
+        # this check, a caller acts on a bare "it's up" and hits a confusing low-level failure
+        # downstream (a Docker exec TCP-hijack 409, a client connection refusal, ...) instead of
+        # this function correctly reporting the service as not up.
+        checkCount=5
+
+        while [ "${checkCount}" != "0" ] && [ -z "$(docker compose ps --services "${1}" --status running)" ]; do
+            checkCount=$((checkCount - 1))
+            sleep 1
+        done
+
+        if [ -n "$(docker compose ps --services "${1}" --status running)" ]; then
+            return 0
+        fi
+
+        return 1
+    elif [ -n "$(docker compose ps --services "${1}" --status running)" ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Check if a Docker Compose service is configured.
+isServiceConfigured()
+{
+    if [ -z "$1" ]; then
+        return 1
+    fi
+
+    docker compose config --services | grep -qx "$1"
+}
+
+# Build a service image only when not running in remote mode.
+# On remote, Docker images are pre-loaded by Waddle before this script runs.
+buildService() {
+    if [ "${WADDLE_REMOTE}" != "0" ]; then
+        docker compose build "${1}"
+    fi
+}
+
+echo "[WADDLE NOTICE] Starting build."
+
+# Ensure our environment is prepared.
+#
+# This confirms we've loaded up data into env vars from the set-env script.
+if [ "${WADDLE_ENV_PREPARED}" != "0" ]; then
+    echo "[WADDLE ERROR] Environment not prepared, aborting."
+    exit 1
+fi
+
+# Original branch is resolved by set-env script.
+# It must be captured before any git operations (like checking out build branch).
+echo "[WADDLE] Original branch: ${WADDLE_ORIGINAL_BRANCH}"
+
+if [ -z "${WADDLE_ORIGINAL_BRANCH}" ]; then
+    echo "[WADDLE ERROR] Original branch not set. This should be set by set-env script."
+    exit 1
+fi
+
+# On remote, the correct code is already in place after git push and images are
+# pre-loaded by Waddle, so none of this is needed. We intentionally avoid re-building
+# images in remote environments because it's a time-consuming and unnecessary operation.
+#
+# Waddle itself backs up what a rollback needs before it renders the templates (the running
+# services, the gitignored files in builder/<tag>/stash.tar.gz, and which service data
+# directories exist), since the render rewrites gitignored files. The services are only recorded
+# here when the script is run by hand.
+if [ "${WADDLE_REMOTE}" != "0" ]; then
+    # Remember what services are currently available (for local rollbacks).
+    if [ ! -f "./builder/${WADDLE_BUILD_TAG}/services.txt" ]; then
+        docker compose ps --services | tr '\n' ' ' > "./builder/${WADDLE_BUILD_TAG}/services.txt"
+    fi
+
+    if [ "${WADDLE_BUILD_TAG}" != "$(git branch --show-current)" ]; then
+        echo "[WADDLE] Creating build tag."
+        git checkout -b "${WADDLE_BUILD_TAG}"
+        git add -A
+        git commit --allow-empty -m "${WADDLE_BUILD_TAG}-start"
+    fi
+fi
+
+# Clear Redis cache.
+if ensureServiceUp "redis"; then
+    echo "[WADDLE] Flushing redis cache"
+    docker compose exec -T redis redis-cli FLUSHALL
+fi
+
+# Snapshot the database before taking containers down.
+# This must happen while the old container is still running on the old image, so the
+# dump is schema-compatible with that image and a rollback can cleanly restore it.
+# Skipped on first build when no DB container exists yet.
+if ensureServiceUp "db"; then
+    echo "[WADDLE] Backing up databases."
+    docker compose exec -u 0 -T db sh "{{project_path 'mariadb/script/backup.sh'}}" "{{project_path 'mariadb'}}/.waddle_backup.sql"
+    mv ./mariadb/.waddle_backup.sql "./builder/${WADDLE_BUILD_TAG}/db.sql"
+    tar -C "./builder/${WADDLE_BUILD_TAG}" -czf "./builder/${WADDLE_BUILD_TAG}/db.tar.gz" db.sql
+    rm -f "./builder/${WADDLE_BUILD_TAG}/db.sql"
+fi
+
+# Stop running containers.
+# On remote: docker compose down (keep volumes — data dirs are bind-mounted but
+# named volumes, if any, are preserved). Locally: down -v for a clean slate.
+echo "[WADDLE] Stopping running containers."
+if [ "${WADDLE_REMOTE}" = "0" ]; then
+    docker compose down || true
+else
+    docker compose down -v || true
+fi
+
+# Generate SSL certificates (local only — remote uses real certificates).
+#
+# Certs are named after the project directory rather than the website URL, so the filename stays
+# stable across URL changes and can't collide with another project using the same URL.
+#
+# Note that this requires mkcert to be installed locally.
+if [ "${WADDLE_REMOTE}" != "0" ] && [ "${WADDLE_SSL}" = "0" ] && [ -n "${WADDLE_WEBSITE_URL}" ] && [ -n "$(command -v mkcert)" ]; then
+    echo "[WADDLE] Generating SSL certificates."
+
+    if [ ! -d ./ssl ]; then
+        mkdir ./ssl
+    fi
+
+    mkcert -cert-file "./ssl/{{ssl.cert_name}}.crt" -key-file "./ssl/{{ssl.cert_name}}.key" "${WADDLE_WEBSITE_URL}" "*.${WADDLE_WEBSITE_URL}"
+fi
+
+# Build OpenSearch service.
+if isServiceConfigured "opensearch"; then
+    echo "[WADDLE OPENSEARCH START]"
+    echo "[WADDLE] Building OpenSearch service (opensearch)."
+
+    buildService opensearch
+    docker compose up -d opensearch
+
+    if ! ensureServiceUp "opensearch"; then
+        echo "[WADDLE] OpenSearch service (opensearch) failed to start."
+        exit 1
+    fi
+
+    echo "[WADDLE OPENSEARCH END]"
+fi
+
+# Build Redis service.
+if isServiceConfigured "redis"; then
+    echo "[WADDLE REDIS START]"
+    echo "[WADDLE] Building Redis service (redis)."
+
+    buildService redis
+    docker compose up -d redis
+
+    if ! ensureServiceUp "redis"; then
+        echo "[WADDLE ERROR] Redis service (redis) failed to start."
+        exit 1
+    fi
+
+    echo "[WADDLE] Executing init script inside Redis container."
+    docker compose exec -T redis "{{project_path 'redis/script/init.sh'}}"
+
+    echo "[WADDLE REDIS END]"
+fi
+
+# Build MailCatcher service.
+if isServiceConfigured "mail"; then
+    echo "[WADDLE MAILCATCHER START]"
+    echo "[WADDLE] Building MailCatcher service (mail)."
+
+    buildService mail
+    docker compose up -d mail
+
+    if ! ensureServiceUp "mail"; then
+        echo "[WADDLE ERROR] MailCatcher service (mail) failed to start."
+        exit 1
+    fi
+
+    echo "[WADDLE MAILCATCHER END]"
+fi
+
+# Build MariaDB service.
+if isServiceConfigured "db"; then
+    echo "[WADDLE MARIADB START]"
+    echo "[WADDLE] Building database service (db)."
+
+    buildService db
+
+    # init.sh is self-guarding: it checks for an existing data directory and skips
+    # initialisation if one is found.
+    echo "[WADDLE] Executing init script inside database container."
+    docker compose run --rm db "{{project_path 'mariadb/script/init.sh'}}"
+
+    echo "[WADDLE] Starting database container."
+    docker compose up -d db
+
+    if ! ensureServiceUp "db"; then
+        echo "[WADDLE ERROR] Database service (db) failed to start."
+        exit 1
+    fi
+
+    # Wait for mysqld service to start inside container.
+    waitCount=60
+
+    while [ "${waitCount}" != "0" ] && [ -z "$(docker compose exec -u 0 -T db mysqladmin ping || true)" ]; do
+        echo "[WADDLE] Waiting for mysqld..."
+        waitCount=$((waitCount - 1))
+        sleep 1
+    done
+
+    if [ "${waitCount}" = "0" ]; then
+        echo "[WADDLE ERROR] Database service (db) failed to start. MySQL daemon never came alive."
+        exit 1
+    fi
+
+    # Drop current database (local only — never drop a remote database automatically).
+    if [ "${WADDLE_REMOTE}" != "0" ] && [ -n "${WADDLE_DB_NAME}" ] && [ "${WADDLE_DROP_DB}" = "0" ]; then
+        echo "[WADDLE] Dropping database ${WADDLE_DB_NAME}."
+        docker compose exec -u 0 -T db mariadb -e "DROP DATABASE IF EXISTS ${WADDLE_DB_NAME}"
+    fi
+
+    # setup.sh is idempotent (CREATE DATABASE/USER IF NOT EXISTS) and runs mariadb-upgrade
+    # to update system tables after a version change.
+    echo "[WADDLE] Executing setup script inside database container."
+    docker compose exec -u 0 -T db "{{project_path 'mariadb/script/setup.sh'}}"
+
+    # Import the database supplied when the project was cloned (local only), before the website
+    # installer runs. Waddle removes the file once the build has succeeded.
+    if [ "${WADDLE_REMOTE}" != "0" ] && [ -f ./builder/clone-database.sql ] && [ -n "${WADDLE_DB_NAME}" ]; then
+        echo "[WADDLE] Importing the supplied database into ${WADDLE_DB_NAME}."
+
+        if ! docker compose exec -u 0 -T db mariadb "${WADDLE_DB_NAME}" < ./builder/clone-database.sql; then
+            echo "[WADDLE ERROR] Failed to import the supplied database."
+            exit 1
+        fi
+    fi
+
+    echo "[WADDLE MARIADB END]"
+fi
+
+# Build Node service.
+if isServiceConfigured "node"; then
+    echo "[WADDLE NODE START]"
+    echo "[WADDLE] Building Node service (node)."
+
+    buildService node
+    docker compose up -d node
+
+# If Node is the runtime, the container must stay up (idling until the platform installer
+# has put the website in place, on a first build). Otherwise, only a failed exit counts
+# (a running container reports exit code 0 as well).
+{{#if (is_equal (get_platform_runtime public.website.platform) 'node')}}
+    if ! ensureServiceUp "node"; then
+        echo "[WADDLE ERROR] Node service (node) failed to start."
+        exit 1
+    fi
+{{else}}
+    if ! docker compose ps -a --format json node | grep -q '"ExitCode":0,'; then
+        echo "[WADDLE ERROR] Node service (node) failed to start."
+        exit 1
+    fi
+{{/if}}
+
+    # Build Node cron service.
+    if isServiceConfigured "node-cron"; then
+        echo "[WADDLE] Building Node cron service (node-cron)."
+        buildService node-cron
+        docker compose up -d node-cron
+
+        if ! ensureServiceUp "node-cron"; then
+            echo "[WADDLE ERROR] Node cron service (node-cron) failed to start."
+            exit 1
+        fi
+    fi
+
+    echo "[WADDLE NODE END]"
+fi
+
+# Build PHP service.
+if isServiceConfigured "php"; then
+    echo "[WADDLE PHP START]"
+    echo "[WADDLE] Building PHP service (php)."
+
+    buildService php
+    docker compose up -d php
+
+    if ! ensureServiceUp "php"; then
+        echo "[WADDLE ERROR] PHP service (php) failed to start."
+        exit 1
+    fi
+
+    # Install Composer.
+    if [ "${WADDLE_INSTALL_COMPOSER}" = "0" ]; then
+        echo "[WADDLE] Installing Composer."
+        docker compose exec -T php "{{project_path 'composer/script/install.sh'}}"
+
+        # Install the website's Composer dependencies. Most platforms' own .gitignore leaves vendor/
+        # out, so a push brings composer.json and composer.lock without vendor/: a remote installs
+        # what the lock file names on every deploy, picking up dependency changes. Locally, only a
+        # clone of an installed website lacks vendor/; a fresh install has no source yet, and an
+        # installed website keeps the dependencies you manage yourself.
+        if [ -f "./website/src/composer.json" ] && { [ "${WADDLE_REMOTE}" = "0" ] || [ ! -d "./website/src/vendor" ]; }; then
+            echo "[WADDLE] Installing the website's Composer dependencies."
+            docker compose exec -T php composer install --no-interaction --working-dir="{{project_path 'website/src'}}"
+        fi
+    fi
+
+    # Install PhpMyAdmin, only locally though since it's incredibly unsafe
+    # to run on a remote server.
+    if [ "${WADDLE_REMOTE}" != "0" ] && [ "${WADDLE_INSTALL_PHPMYADMIN}" = "0" ]; then
+        echo "[WADDLE] Installing PhpMyAdmin."
+        docker compose exec -T php "{{project_path 'phpmyadmin/script/install.sh'}}"
+    fi
+
+    # Build PHP cron service.
+    if isServiceConfigured "php-cron"; then
+        echo "[WADDLE] Building PHP cron service (php-cron)."
+
+        buildService php-cron
+        docker compose up -d php-cron
+
+        if ! ensureServiceUp "php-cron"; then
+            echo "[WADDLE ERROR] PHP cron service (php-cron) failed to start."
+            exit 1
+        fi
+    fi
+    echo "[WADDLE PHP END]"
+fi
+
+# Stop cron containers before the platform installer runs to prevent scheduled jobs
+# from firing against an application in a mid-install state.
+if ensureServiceUp "php-cron"; then
+    echo "[WADDLE] Stopping PHP cron container."
+    docker compose stop php-cron
+fi
+
+if ensureServiceUp "node-cron"; then
+    echo "[WADDLE] Stopping Node cron container."
+    docker compose stop node-cron
+fi
+
+# Install / update website source (local only — platform installer runs at initial setup,
+# not on every remote deploy).
+if [ "${WADDLE_REMOTE}" != "0" ] && [ "${WADDLE_RUN_PLATFORM_INSTALLER}" = "0" ]; then
+    echo "[WADDLE WEBSITE START]"
+
+    INSTALLER_SCRIPT="./website/script/unix/${WADDLE_PLATFORM}/installer.sh"
+
+    if [ -f "${INSTALLER_SCRIPT}" ]; then
+        {{#if public.php.install}}
+        if ! ensureServiceUp "php"; then
+            echo "[WADDLE ERROR] PHP service (php) is not running. Failed to execute website installer."
+            exit 1
+        fi
+        {{/if}}
+        {{#if (is_equal (get_platform_runtime public.website.platform) 'node')}}
+        if ! ensureServiceUp "node"; then
+            echo "[WADDLE ERROR] Node service (node) is not running. Failed to execute website installer."
+            exit 1
+        fi
+        {{/if}}
+
+        echo "[WADDLE] Executing website installer script."
+        "${INSTALLER_SCRIPT}" $WADDLE_ARGS
+    else
+        echo "[WADDLE] No installer script found for platform ${WADDLE_PLATFORM}, skipping."
+    fi
+
+    echo "[WADDLE WEBSITE END]"
+fi
+
+# Build Nginx service.
+if isServiceConfigured "web"; then
+    echo "[WADDLE NGINX START]"
+    echo "[WADDLE] Building Nginx service (web)."
+    buildService web
+    docker compose up -d web
+
+    if ! ensureServiceUp "web"; then
+        echo "[WADDLE ERROR] Nginx service (web) failed to start."
+        exit 1
+    fi
+    echo "[WADDLE NGINX END]"
+fi
+
+# Commit after completing the process and merge back to original branch (local only).
+if [ "${WADDLE_REMOTE}" != "0" ]; then
+    echo "[WADDLE] Committing updates."
+
+    if git add -A; then
+        git commit --allow-empty -m "${WADDLE_BUILD_TAG}-complete"
+
+        echo "[WADDLE] Checking out original branch: ${WADDLE_ORIGINAL_BRANCH}"
+        git checkout "${WADDLE_ORIGINAL_BRANCH}"
+
+        echo "[WADDLE] Merging ${WADDLE_BUILD_TAG} into ${WADDLE_ORIGINAL_BRANCH}"
+        git merge "${WADDLE_BUILD_TAG}"
+
+        if [ "${WADDLE_KEEP_BUILD_BRANCH}" != "0" ]; then
+            echo "[WADDLE] Deleting build branch."
+            git branch -D "${WADDLE_BUILD_TAG}"
+        fi
+
+        # Restart running containers after merge: git checkout briefly removes files that are
+        # only on the build branch (e.g. mail/conf/msmtprc), and the kernel dentry cache
+        # inside a running container caches that absence. A restart forces a fresh directory
+        # read. Cron containers are stopped at this point and are started fresh below, so
+        # they don't need an explicit restart here.
+        if ensureServiceUp "php"; then
+            echo "[WADDLE] Restarting PHP after merge."
+            docker compose restart php
+        fi
+
+        if ensureServiceUp "node"; then
+            echo "[WADDLE] Restarting Node after merge."
+            docker compose restart node
+        fi
+    else
+        # The build itself succeeded (services are up), but the working tree is left
+        # uncommitted on the build branch so no data is lost or silently discarded. The
+        # original branch is intentionally left un-merged since resolving that automatically
+        # over a dirty tree could conflict or drop changes.
+        echo "[WADDLE NOTICE] Failed to add files to git repository."
+        echo "[WADDLE NOTICE] Changes remain uncommitted on branch ${WADDLE_BUILD_TAG}. Resolve manually with: git add -A && git commit -m \"${WADDLE_BUILD_TAG}-complete\" && git checkout ${WADDLE_ORIGINAL_BRANCH} && git merge ${WADDLE_BUILD_TAG}"
+    fi
+fi
+
+# Start cron containers again.
+if ! ensureServiceUp "php-cron"; then
+    echo "[WADDLE] PHP cron container is not available."
+fi
+
+if ! ensureServiceUp "node-cron"; then
+    echo "[WADDLE] Node cron container is not available."
+fi
+
+if [ "${WADDLE_CLEAN}" = "0" ] && [ -n "${WADDLE_BUILD_TAG}" ]; then
+    echo "[WADDLE] Cleaning up."
+    rm -rf "./builder/${WADDLE_BUILD_TAG}"
+fi

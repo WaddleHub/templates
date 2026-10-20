@@ -1,0 +1,113 @@
+#!/bin/sh -eux
+. ./bin/deploy/set-env "$@"
+
+# Ensures a docker service is running, starting or unpausing it if needed.
+#
+# Returns 0 if the service is up after the call, 1 if it is not present in the compose config.
+ensureServiceUp()
+{
+    if [ -n "$(docker compose ps --services "${1}" --status paused)" ]; then
+        docker compose unpause "${1}"
+        return 0
+    elif [ -n "$(docker compose ps --services "${1}" --status exited)" ]; then
+        docker compose up -d "${1}"
+        return 0
+    elif [ -n "$(docker compose ps --services "${1}" --status running)" ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+echo "[WADDLE NOTICE] Executing rollback."
+if [ "${WADDLE_BUILD_TAG}" = "$(git branch --show-current)" ]; then
+    echo "[WADDLE] Resetting repository."
+    git checkout "${WADDLE_ORIGINAL_BRANCH}"
+    git reset --hard HEAD
+    git clean -fd
+fi
+
+# Drop the build branch ref now that we are back on the original branch. A
+# failed build branch holds no value and lingering refs accumulate over time.
+if git show-ref --verify --quiet "refs/heads/${WADDLE_BUILD_TAG}"; then
+    echo "[WADDLE] Dropping build branch ${WADDLE_BUILD_TAG}."
+    git branch -D "${WADDLE_BUILD_TAG}"
+fi
+
+if [ -f "./builder/${WADDLE_BUILD_TAG}/stash.tar.gz" ]; then
+    echo "[WADDLE] Extracting config stash."
+    stashed=""
+
+    if [ -f "./builder/${WADDLE_BUILD_TAG}/stash.txt" ]; then
+        stashed="$(cat "./builder/${WADDLE_BUILD_TAG}/stash.txt")"
+    fi
+
+    sh ./bin/deploy/file-task replace "./builder/${WADDLE_BUILD_TAG}/stash.tar.gz" $stashed
+fi
+
+# Rebuild services BEFORE restoring the DB dump - if the build broke while
+# rebuilding the database image, we must first bring up the original (now
+# restored) image before any dump can be imported into it.
+#
+# services.txt records the services that existed before the build started. A
+# build can add or remove services (e.g. adding Redis, dropping OpenSearch), so
+# we cannot rely on the current docker-compose.yml to know what was running.
+# Rebuilding from this snapshot reinstates exactly the pre-build service set.
+#
+# This file is only written during local builds; bin/deploy/run skips it on
+# remote because Waddle pre-loads the correct images before the script runs.
+# Its absence on a remote rollback is intentional — this block is correctly skipped.
+#
+# A service that fails to come back must not stop the database restore below, so the failure is
+# reported once everything else has been restored.
+services_failed=0
+
+if [ -f "./builder/${WADDLE_BUILD_TAG}/services.txt" ]; then
+    echo "[WADDLE] Rebuilding services."
+    services="$(cat "./builder/${WADDLE_BUILD_TAG}/services.txt")"
+
+    if [ -n "${services}" ]; then
+        docker compose build ${services} || services_failed=1
+        docker compose up -d || services_failed=1
+    fi
+fi
+
+if [ -f "./builder/${WADDLE_BUILD_TAG}/db.tar.gz" ] && ensureServiceUp db; then
+    echo "[WADDLE] Importing database backup."
+    tar -C "./builder/${WADDLE_BUILD_TAG}" -xzf "./builder/${WADDLE_BUILD_TAG}/db.tar.gz"
+    # Restored from the mariadb bind mount, replacing the current databases (see restore.sh).
+    cp "./builder/${WADDLE_BUILD_TAG}/db.sql" ./mariadb/.waddle_restore.sql
+    restore_failed=0
+    docker compose exec -u 0 -T db sh "{{project_path 'mariadb/script/restore.sh'}}" "{{project_path 'mariadb'}}/.waddle_restore.sql" || restore_failed=1
+    rm -f ./mariadb/.waddle_restore.sql
+
+    if [ "${restore_failed}" = "1" ]; then
+        echo "[WADDLE ERROR] Failed to import database backup."
+        exit 1
+    fi
+fi
+
+# Platform rollback convention: rollback.sh runs host-side after the generic
+# source restore, handling post-restore steps (migrations, cache clears,
+# maintenance disable) via docker compose exec.
+ROLLBACK="./website/script/unix/${WADDLE_PLATFORM}/rollback.sh"
+
+if [ -f "${WADDLE_BUILD_DIR}/src.tar.gz" ]; then
+    echo "[WADDLE] Restoring source directory content from backup."
+    ./bin/web/backup --restore
+fi
+
+if [ -f "${ROLLBACK}" ]; then
+    echo "[WADDLE] Executing website rollback script."
+    "${ROLLBACK}" $WADDLE_ARGS
+fi
+
+if [ "${services_failed}" = "1" ]; then
+    echo "[WADDLE ERROR] Failed to start services."
+    exit 1
+fi
+
+if [ "${WADDLE_CLEAN}" = "0" ] && [ -n "${WADDLE_BUILD_TAG}" ]; then
+    echo "[WADDLE] Cleaning up."
+    rm -rf "./builder/${WADDLE_BUILD_TAG}"
+fi

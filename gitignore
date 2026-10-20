@@ -1,0 +1,163 @@
+# Ignore OS-generated files.
+# macOS
+.DS_Store
+._*
+# Windows
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+
+# Ignore editor swap and backup files (vim, nano, emacs, …).
+*.swp
+*.swo
+*~
+*.save
+*.save.*
+
+# Ignore JetBrains/VSCode IDE project directories.
+.idea/
+.vscode/
+
+# Ignore build state files. These are local to each machine and must not be shared.
+.build.lock
+.build.json
+
+# Ignore local project files and directories.
+# NOTE: Some of the below must be excluded to ensure they do not appear in prod.
+/.env
+ssl/
+builder/
+ssh/
+# Remote specfiic files supplied manually on need, like a remote's SSL certificate.
+/remotes/
+docker-compose.override.yml
+.config.private.json
+
+# Nginx
+nginx/data/
+nginx/log/
+# ACME cert directive, regenerated each time you push/deploy to a remote. Each remote
+# requests its own Let's Encrypt certificate for its own domain, and the module that
+# handles that only allows one such directive and can't use variables in it, so this
+# file is written fresh per remote rather than committed to the repo.
+nginx/conf/extras/00-waddle-acme.conf
+
+# Composer (holds Magento keys / GitHub token — must never be committed)
+composer/conf/home/auth.json
+# The Composer binary.
+bin/composer
+# Composer's cache where the shared directory isn't mounted (remotes).
+composer/conf/home/cache/
+
+# OpenSearch
+opensearch/data/
+opensearch/log/
+# Automatically created on first run, owned by the dameon. Tracking it can cause
+# permission issues, contains sensitive data, makes no sense to track.
+opensearch/conf/opensearch.keystore
+
+# MariaDB
+mariadb/data/
+mariadb/log/
+
+# PHP
+php/data/
+php/log/
+# Development-only PHP config: kept local so production loads the hardened
+# defaults from 10-waddle.ini instead of these overrides.
+php/conf/conf.d/80-dev.ini
+# Ensure xdebug config is never published to remotes.
+php/conf/conf.d/95-xdebug.ini
+
+# PHPMyAdmin
+phpmyadmin/data
+# Holds the database credentials. Rendered on every build.
+phpmyadmin/conf/config.inc.custom.php
+nginx/conf/conf.d/phpmyadmin.conf
+
+# SMTP relay
+smtp/log/
+
+# Redis
+redis/data/
+redis/log/
+
+# Node
+node/log/
+
+{{#each (get_daemon_owned_dirs public.website.platform)}}
+{{#if @first}}
+# Directories the platform needs to write into at runtime as its unprivileged daemon user;
+# compiled views, sessions, cache, logs, and similar generated output. None of this is
+# source content, and keeping it out of the repo means a container can always create and
+# take ownership of these directories fresh on startup, rather than inheriting whatever
+# ownership they'd have from a commit.
+{{/if}}
+website/src/{{this}}/
+{{/each}}
+
+{{#each (get_deploy_files public.website.platform)}}
+{{#if @first}}
+# The platform's configuration: DB credentials, keys and salts, and anything else each environment
+# keeps its own copy of (e.g. Magento's module list). Never committed, whatever the platform's own
+# .gitignore says. During remote deploys Waddle uploads them, if missing, to the remote.
+{{/if}}
+{{this}}
+{{/each}}
+
+{{#if (some (is_equal public.website.platform 'bagisto') (is_equal public.website.platform 'cakephp') (is_equal public.website.platform 'directus') (is_equal public.website.platform 'flarum') (is_equal public.website.platform 'freescout') (is_equal public.website.platform 'kanboard') (is_equal public.website.platform 'krayin') (is_equal public.website.platform 'laravel') (is_equal public.website.platform 'phpbb') (is_equal public.website.platform 'processwire') (is_equal public.website.platform 'strapi') (is_equal public.website.platform 'uvdesk') (is_equal public.website.platform 'vendure') (is_equal public.website.platform 'wintercms') (is_equal public.website.platform 'wordpress'))}}
+# Rendered platform config holding literal credentials (database credentials, keys, salts). These
+# are the rendered templates, not the config files the website uses: the installer copies them
+# into place (gitignored above as deploy files). Here, we gitignore the rendered templates
+# themselves. Every build renders them again.
+{{/if}}
+{{#if (some (is_equal public.website.platform 'bagisto') (is_equal public.website.platform 'directus') (is_equal public.website.platform 'freescout') (is_equal public.website.platform 'krayin') (is_equal public.website.platform 'laravel') (is_equal public.website.platform 'strapi') (is_equal public.website.platform 'uvdesk') (is_equal public.website.platform 'vendure') (is_equal public.website.platform 'wintercms'))}}
+website/conf/{{public.website.platform}}/.env
+{{/if}}
+{{#if (is_equal public.website.platform 'cakephp')}}
+website/conf/cakephp/app_local.php
+{{/if}}
+{{#if (is_equal public.website.platform 'flarum')}}
+website/conf/flarum/install.yml
+{{/if}}
+{{#if (is_equal public.website.platform 'kanboard')}}
+website/conf/kanboard/config.php
+{{/if}}
+{{#if (is_equal public.website.platform 'phpbb')}}
+website/conf/phpbb/install.yml
+{{/if}}
+{{#if (is_equal public.website.platform 'processwire')}}
+website/conf/processwire/config-append.php
+{{/if}}
+{{#if (is_equal public.website.platform 'wordpress')}}
+website/conf/wordpress/wp-config.php
+{{/if}}
+
+{{#each (get_bin_links public.website.platform)}}
+{{#if @first}}
+# Links exposing the platform's CLI on PATH inside the php container. Created by
+# php/script/run.sh on every container start, so they never need to be committed.
+{{/if}}
+bin/{{this.name}}
+{{/each}}
+
+{{#if (is_equal public.website.platform 'magento')}}
+# Magento sample data.
+website/src/sample-data/
+website/src/README.md
+website/src/app/code/Magento
+website/src/dev/tools/build-sample-data.php
+website/src/vendor/magento/sample-data-media
+{{/if}}
+
+{{#if public.gitignore_website_src}}
+# Website source (the installed CMS/framework core) — re-downloaded by a fresh build via Waddle,
+# so it is excluded here rather than committed. Off by default; opt in per-project.
+website/src/
+{{/if}}
+
+# Template copies are never ignored because they hold placeholders, never values, and git
+# restores them on build rollback. The directory line is needed since git can't re-include
+# a file inside a directory that's still excluded (e.g. templates/ssl/ by ssl/).
+!/templates/**/
+!/templates/**

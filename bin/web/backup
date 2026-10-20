@@ -1,0 +1,96 @@
+#!/bin/sh -eux
+
+# Create or restore a tar.gz snapshot of the website source directory. Used by the
+# platform installer and rollback scripts to preserve ./website/src across upgrades.
+#
+# NOTE: assumes it is executed from the project directory.
+
+# Path to apply the backup operation on.
+path="./website/src"
+
+# Path to the tar file. Defaults to the build directory's source snapshot when available.
+tarPath=""
+if [ -n "${WADDLE_BUILD_DIR:-}" ]; then
+    tarPath="${WADDLE_BUILD_DIR}/src.tar.gz"
+fi
+
+# Space-separated list of patterns to exclude (relative to $path), and whether we restore.
+exclude=""
+restore=""
+
+# Resolve arguments.
+while [ "$#" -gt 0 ]; do
+    case "${1}" in
+        --restore) restore="0"; shift ;;
+        --exclude) exclude="${2}"; shift 2 ;;
+        --tarPath) tarPath="${2}"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+
+# Ensure a tar path has been resolved.
+if [ -z "${tarPath}" ]; then
+    echo "[WADDLE ERROR] No tar path specified."
+    exit 1
+fi
+
+# The archive is handled inside a container that only mounts the project directory, so it must be
+# addressed relative to it.
+case "${tarPath}" in
+    "$(pwd)"/*) tarPath="./${tarPath#"$(pwd)"/}" ;;
+    /*)
+        echo "[WADDLE ERROR] Tar path ${tarPath} is outside the project directory."
+        exit 1
+        ;;
+esac
+
+case "${tarPath}" in
+    .. | ../* | */.. | */../*)
+        echo "[WADDLE ERROR] Tar path ${tarPath} is outside the project directory."
+        exit 1
+        ;;
+esac
+
+# The exclude patterns used when creating the backup, kept so a restore leaves the same paths alone.
+excludePath="${tarPath}.exclude"
+
+if [ "${restore}" = "0" ]; then
+    echo "[WADDLE] Restoring backup ${tarPath} to ${path}"
+
+    if [ ! -f "${tarPath}" ]; then
+        echo "[WADDLE ERROR] No tar file found at ${tarPath}."
+        exit 1
+    fi
+
+    if [ -f "${excludePath}" ]; then
+        exclude="$(cat "${excludePath}")"
+    fi
+
+    # Anything the failed build added is removed as well, so the source matches the backup exactly.
+    if [ -n "${exclude}" ]; then
+        sh ./bin/deploy/file-task restore "${tarPath}" "${path}" --exclude "${exclude}"
+    else
+        sh ./bin/deploy/file-task restore "${tarPath}" "${path}"
+    fi
+else
+    echo "[WADDLE] Creating backup of ${path} at ${tarPath}"
+
+    if [ ! -d "${path}" ]; then
+        echo "[WADDLE ERROR] ${path} is not a directory."
+        exit 1
+    fi
+
+    # Create the destination directory if it does not exist.
+    tarDir="${tarPath%/*}"
+    if [ ! -d "${tarDir}" ]; then
+        mkdir -p "${tarDir}"
+    fi
+
+    printf '%s\n' "${exclude}" > "${excludePath}"
+
+    if [ -n "${exclude}" ]; then
+        sh ./bin/deploy/file-task archive "${tarPath}" "${path}" --exclude "${exclude}" .
+    else
+        sh ./bin/deploy/file-task archive "${tarPath}" "${path}" .
+    fi
+fi
