@@ -40,10 +40,11 @@ if [ "$(curl -o /dev/null --silent -LIw '%{http_code}' --retry 3 --retry-delay 5
     gpg --batch --verify /tmp/php.tar.${PHP_TAR_EXT}.asc /tmp/php.tar.${PHP_TAR_EXT}; \
     rm -rf /tmp/gpg-keys; \
     {{/if}}
-for src_dest in \
-    "/usr/lib/libc-client.a:/usr/lib/x86_64-linux-gnu/libc-client.a" \
-    "/usr/include/x86_64-linux-gnu/gmp.h:/usr/include/gmp.h" \
-    "/usr/include/x86_64-linux-gnu/curl:/usr/include/curl"; do \
+multiArch="$(dpkg-architecture --query DEB_BUILD_MULTIARCH 2>/dev/null || echo "$(uname -m)-linux-gnu")"; \
+    for src_dest in \
+    "/usr/lib/libc-client.a:/usr/lib/${multiArch}/libc-client.a" \
+    "/usr/include/${multiArch}/gmp.h:/usr/include/gmp.h" \
+    "/usr/include/${multiArch}/curl:/usr/include/curl"; do \
     src="${src_dest%%:*}"; \
     dest="${src_dest#*:}"; \
     if [ -e "$src" ] && [ ! -e "$dest" ]; then \
