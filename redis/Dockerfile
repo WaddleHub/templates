@@ -26,7 +26,7 @@ RUN set -eux; \
     tar -C /tmp/redis -xzf /tmp/redis.tar.gz --no-same-owner --strip-components=1; \
     mkdir -p {{public.redis.prefix}}/conf; \
     cp /tmp/redis/redis.conf {{public.redis.prefix}}/conf; \
-    make -C /tmp/redis -s -j"$(nproc)"; \
+    make -C /tmp/redis -s -j{{public.redis.parallel_build_jobs}}; \
     make -C /tmp/redis install
 
 # -------------------------------------------------

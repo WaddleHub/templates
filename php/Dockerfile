@@ -62,7 +62,7 @@ multiArch="$(dpkg-architecture --query DEB_BUILD_MULTIARCH 2>/dev/null || echo "
 $(test "$gnuArch" = 's390x-linux-musl' && echo '--without-pcre-jit') \
     {{/if}}
 {{parse_compile_options 'php' tags.php.version.raw public.php.compile_options}}; \
-    make -C /tmp/php -s -j"$(nproc)"; \
+    make -C /tmp/php -s -j{{public.php.parallel_build_jobs}}; \
     make -C /tmp/php install; \
     mkdir -p "{{public.php.prefix}}/etc"; \
     cp -f /tmp/php/php.ini-production "{{public.php.prefix}}/etc/php.ini"; \
