@@ -54,7 +54,8 @@ if ($LASTEXITCODE -ne 0) {
 # Drupal locks sites/default and its settings files to read-only (555/444) after installation,
 # which stops git from switching or merging branches over them. Give the owner write access
 # back, and set skip_permissions_hardening in settings.php so Drupal stops locking them again.
-docker compose exec -T php sh -c '
+# Piped via stdin: Windows PowerShell 5.1 strips embedded double quotes from native-command arguments.
+@'
 d="{{project_path 'website/src'}}/web/sites/default"
 if [ -d "$d" ]; then
     chmod u+w "$d" && find "$d" -maxdepth 1 -type f -name "*.php" -exec chmod u+w {} + || exit 1
@@ -62,5 +63,5 @@ if [ -d "$d" ]; then
         printf "\n\$settings[\047skip_permissions_hardening\047] = TRUE;\n" >> "$d/settings.php"
     fi
 fi
-'
+'@ | docker compose exec -T php sh -c "tr -d '\r' | sh"
 if ($LASTEXITCODE -ne 0) { throw "Failed to restore write access to sites/default." }

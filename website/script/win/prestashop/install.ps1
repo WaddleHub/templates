@@ -42,6 +42,7 @@ docker compose exec -T php php "{{project_path 'website/src'}}/$installerName/in
     --db_user="$env:WADDLE_DB_USER" `
     --db_password="$env:WADDLE_DB_PASSWORD" `
     --db_clear=1 `
+    --fixtures={{#if public.website.deploy_sample_data}}1{{else}}0{{/if}} `
     --language="{{public.website.language}}" `
     --timezone={{timezone}} `
     --newsletter=0{{#if ssl.enabled}} --ssl=1{{/if}} | Tee-Object -Variable installOutput

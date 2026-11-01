@@ -24,7 +24,7 @@ if ($LASTEXITCODE -ne 0) { throw "Failed to apply configuration." }
 # --skip-cloud-promotion.
 Write-Host "[WADDLE] Installing Bagisto."
 {{#if (version_compare tags.website.version.raw '>=' '2.5.0')}}
-docker compose exec -T php php "{{project_path 'website/src'}}/artisan" bagisto:install --no-interaction
+docker compose exec -T php php "{{project_path 'website/src'}}/artisan" bagisto:install --no-interaction{{#if public.website.deploy_sample_data}} --demo-samples{{/if}}
 {{else}}
 docker compose exec -T php php "{{project_path 'website/src'}}/artisan" bagisto:install `
     --skip-env-check --skip-admin-creation{{#if (version_compare tags.website.version.raw '>=' '2.4.0')}} --skip-github-star{{/if}}{{#if (version_compare tags.website.version.raw '>=' '2.4.6')}} --skip-cloud-promotion{{/if}}

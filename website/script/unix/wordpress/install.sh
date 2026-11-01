@@ -45,6 +45,26 @@ chmod 644 "./website/src/wp-config.php"
 echo "[WADDLE] Installing WooCommerce."
 docker compose exec -T php "{{project_path 'bin'}}/wp" plugin install woocommerce --activate \
     --path="{{project_path 'website/src'}}" --allow-root
+
+# New stores start in "Coming soon" mode, which hides the shop from visitors. Turn it off, since
+# this is a local development site.
+docker compose exec -T php "{{project_path 'bin'}}/wp" option update woocommerce_coming_soon no \
+    --path="{{project_path 'website/src'}}" --allow-root
+{{#if public.website.deploy_sample_data}}
+
+# Import the sample products that ship with WooCommerce. WordPress Importer is only needed for the
+# import, so it's removed again afterwards.
+echo "[WADDLE] Installing sample data."
+docker compose exec -T php "{{project_path 'bin'}}/wp" plugin install wordpress-importer --activate \
+    --path="{{project_path 'website/src'}}" --allow-root
+
+docker compose exec -T php "{{project_path 'bin'}}/wp" import \
+    "{{project_path 'website/src'}}/wp-content/plugins/woocommerce/sample-data/sample_products.xml" \
+    --authors=skip --path="{{project_path 'website/src'}}" --allow-root
+
+docker compose exec -T php "{{project_path 'bin'}}/wp" plugin deactivate wordpress-importer --uninstall \
+    --path="{{project_path 'website/src'}}" --allow-root
+{{/if}}
 {{/if}}
 
 # wp-content/upgrade and wp-content/upgrade-temp-backup (core's own staging areas for the
